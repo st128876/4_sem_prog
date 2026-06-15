@@ -1,0 +1,219 @@
+# ============================================================
+#  Bakery Sales — Полный EDA + Feature Engineering
+#  Данные: Kaggle / hosubjeong/bakery-sales
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+
+plt.rcParams['figure.dpi'] = 120
+plt.rcParams['font.family'] = 'DejaVu Sans'
+
+# ─────────────────────────────────────────────────────────────
+# 1. ЗАГРУЗКА ДАННЫХ
+# ─────────────────────────────────────────────────────────────
+df    = pd.read_csv("Bakery_Sales.xls",  encoding="utf-8-sig")
+price = pd.read_csv("Bakery_price.xls",  encoding="utf-8-sig")
+
+products = [c for c in df.columns
+            if c not in ['datetime', 'day of week', 'total', 'place']]
+
+print("=== 1. ОСНОВНЫЕ ХАРАКТЕРИСТИКИ ===")
+print(f"Размер датасета: {df.shape}  ({df.shape[0]} транзакций, {df.shape[1]} признаков)")
+print("\nТипы данных:\n", df.dtypes)
+print("\nПервые 3 строки:\n", df.head(3).to_string())
+print("\nПропущенные значения:\n", df.isnull().sum())
+print("\nПрайс-лист:\n", price.to_string(index=False))
+
+# ─────────────────────────────────────────────────────────────
+# 2. ЗАДАЧА ПРЕДСКАЗАНИЯ
+# ─────────────────────────────────────────────────────────────
+"""
+ЦЕЛЕВОЙ ПРИЗНАК: total — сумма транзакции (KRW).
+ЗАДАЧА: регрессия суммы заказа по признакам:
+  - день недели, время суток, месяц
+  - место покупки (place)
+  - состав корзины (какие продукты и в каком количестве)
+  - количество позиций и разнообразие заказа
+ПРАКТИЧЕСКОЕ ПРИМЕНЕНИЕ:
+  - Прогнозирование выручки, управление запасами, персонализация предложений.
+"""
+print("\n=== 2. ЗАДАЧА: предсказать total (сумму чека) ===")
+
+# ─────────────────────────────────────────────────────────────
+# 3. ЧИСТКА ДАННЫХ (Data Cleaning)
+# ─────────────────────────────────────────────────────────────
+print("\n=== 3. ЧИСТКА ДАННЫХ ===")
+
+# Удаляем строки без datetime (пустые строки в конце файла)
+df = df.dropna(subset=['datetime'])
+print(f"Строк без datetime удалено: {2654 - len(df)}")
+
+# Парсим дату/время
+df['datetime'] = pd.to_datetime(df['datetime'])
+
+# place: заполняем 'Unknown' (нет информации о месте)
+df['place'].fillna('Unknown', inplace=True)
+print(f"place NaN → 'Unknown': {(df['place']=='Unknown').sum()} записей")
+
+# Продукты: NaN означает 0 штук в заказе
+df[products] = df[products].fillna(0)
+print("Продуктовые колонки: NaN → 0")
+
+# total: заполняем медианой
+median_total = df['total'].median()
+n_total_na = df['total'].isna().sum()
+df['total'].fillna(median_total, inplace=True)
+print(f"total NaN ({n_total_na} шт.) → медиана {median_total:.0f} KRW")
+
+print(f"\nПосле чистки: {df.shape}, пропусков: {df.isnull().sum().sum()}")
+
+# ─────────────────────────────────────────────────────────────
+# 4. FEATURE ENGINEERING
+# ─────────────────────────────────────────────────────────────
+print("\n=== 4. FEATURE ENGINEERING ===")
+
+df['hour']         = df['datetime'].dt.hour
+df['month']        = df['datetime'].dt.month
+df['num_items']    = df[products].sum(axis=1).astype(int)
+df['num_products'] = (df[products] > 0).sum(axis=1).astype(int)
+
+def time_of_day(h):
+    if h < 12:  return 'Morning'
+    elif h < 15: return 'Afternoon'
+    else:        return 'Evening'
+df['time_of_day'] = df['hour'].apply(time_of_day)
+
+# Кодируем день недели числом (для модели)
+day_map = {'Mon':0,'Tue':1,'Wed':2,'Thur':3,'Fri':4,'Sat':5,'Sun':6}
+df['day_num'] = df['day of week'].map(day_map)
+
+# One-hot для place
+df = pd.get_dummies(df, columns=['place'], drop_first=True)
+
+print("Новые признаки: hour, month, num_items, num_products, time_of_day, day_num")
+print("place → one-hot encoded")
+print(f"Итоговая форма: {df.shape}")
+
+# ─────────────────────────────────────────────────────────────
+# 5. ВИЗУАЛИЗАЦИЯ — Обзорный дашборд
+# ─────────────────────────────────────────────────────────────
+product_sales = df[products].sum().sort_values(ascending=False)
+day_order = ['Mon','Tue','Wed','Thur','Fri','Sat','Sun']
+
+fig = plt.figure(figsize=(18, 14))
+fig.suptitle('Bakery Sales — EDA Dashboard', fontsize=17, fontweight='bold', y=0.98)
+gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.44, wspace=0.38)
+
+# 5a: Транзакции по дням недели
+ax1 = fig.add_subplot(gs[0, 0])
+day_counts = df['day of week'].value_counts().reindex(day_order, fill_value=0)
+bars = ax1.bar(day_order, day_counts.values, color=sns.color_palette('pastel', 7))
+ax1.set_title('Транзакции по дням недели', fontsize=10, fontweight='bold')
+ax1.set_ylabel('Кол-во')
+for b in bars:
+    ax1.text(b.get_x()+b.get_width()/2, b.get_height()+4,
+             str(int(b.get_height())), ha='center', fontsize=8)
+
+# 5b: Гистограмма суммы чека (без топ-1% выбросов)
+ax2 = fig.add_subplot(gs[0, 1])
+clip = df[df['total'] < df['total'].quantile(0.99)]['total']
+ax2.hist(clip, bins=35, color='steelblue', edgecolor='white', alpha=0.85)
+ax2.axvline(clip.mean(), color='red', linestyle='--', label=f'Среднее: {clip.mean():.0f}')
+ax2.axvline(clip.median(), color='green', linestyle='--', label=f'Медиана: {clip.median():.0f}')
+ax2.set_title('Распределение суммы чека', fontsize=10, fontweight='bold')
+ax2.set_xlabel('KRW'); ax2.set_ylabel('Частота')
+ax2.legend(fontsize=8)
+
+# 5c: TOP-10 продуктов
+ax3 = fig.add_subplot(gs[0, 2])
+top10 = product_sales.head(10)
+ax3.barh(top10.index[::-1], top10.values[::-1],
+         color=sns.color_palette('husl', 10)[::-1])
+ax3.set_title('TOP-10 продуктов (штук)', fontsize=10, fontweight='bold')
+ax3.set_xlabel('Продано')
+
+# 5d: Boxplot чека по дням
+ax4 = fig.add_subplot(gs[1, 0:2])
+data_by_day = [df[df['day of week']==d]['total']
+               .clip(upper=df['total'].quantile(0.99)).values
+               for d in day_order]
+bp = ax4.boxplot(data_by_day, labels=day_order, patch_artist=True,
+                 medianprops=dict(color='red', linewidth=2))
+for patch, color in zip(bp['boxes'], sns.color_palette('pastel', 7)):
+    patch.set_facecolor(color)
+ax4.set_title('Сумма чека по дням недели (boxplot)', fontsize=10, fontweight='bold')
+ax4.set_ylabel('KRW')
+
+# 5e: Время дня (pie)
+ax5 = fig.add_subplot(gs[1, 2])
+tod_counts = df['time_of_day'].value_counts().reindex(['Morning','Afternoon','Evening'])
+ax5.pie(tod_counts.values, labels=tod_counts.index, autopct='%1.1f%%',
+        colors=sns.color_palette('Set2', 3), startangle=90)
+ax5.set_title('Транзакции по времени дня', fontsize=10, fontweight='bold')
+
+# 5f: Гистограмма кол-ва товаров в чеке
+ax6 = fig.add_subplot(gs[2, 0])
+ax6.hist(df['num_items'], bins=range(1, 20),
+         color='mediumpurple', edgecolor='white', alpha=0.85)
+ax6.set_title('Кол-во товаров в заказе', fontsize=10, fontweight='bold')
+ax6.set_xlabel('Штук'); ax6.set_ylabel('Частота')
+
+# 5g: Средний чек по месяцу
+ax7 = fig.add_subplot(gs[2, 1])
+month_avg = df.groupby('month')['total'].mean()
+ax7.plot(month_avg.index, month_avg.values, 'o-', color='coral',
+         linewidth=2, markersize=7)
+ax7.set_title('Средний чек по месяцу', fontsize=10, fontweight='bold')
+ax7.set_xlabel('Месяц'); ax7.set_ylabel('KRW')
+ax7.set_xticks(month_avg.index)
+
+# 5h: num_items vs total (scatter)
+ax8 = fig.add_subplot(gs[2, 2])
+sc = ax8.scatter(df['num_items'].clip(upper=15),
+                 df['total'].clip(upper=100000),
+                 c=df['num_products'], cmap='viridis', alpha=0.35, s=18)
+plt.colorbar(sc, ax=ax8, label='Разных позиций')
+ax8.set_title('Сумма vs Кол-во товаров', fontsize=10, fontweight='bold')
+ax8.set_xlabel('Штук в заказе'); ax8.set_ylabel('KRW')
+
+fig.savefig('fig1_overview.png', bbox_inches='tight')
+plt.close()
+print("\nСохранено: fig1_overview.png")
+
+# ─────────────────────────────────────────────────────────────
+# 6. КОРРЕЛЯЦИОННАЯ МАТРИЦА
+# ─────────────────────────────────────────────────────────────
+fig2, ax = plt.subplots(figsize=(11, 9))
+top_p = product_sales.head(10).index.tolist()
+corr_df = df[top_p + ['total', 'num_items', 'num_products']].corr()
+mask = np.triu(np.ones_like(corr_df, dtype=bool))
+sns.heatmap(corr_df, mask=mask, annot=True, fmt='.2f', cmap='coolwarm',
+            ax=ax, linewidths=0.5, annot_kws={'size': 9})
+ax.set_title('Матрица корреляции — топ-10 продуктов + целевые признаки',
+             fontsize=12, fontweight='bold')
+ax.tick_params(axis='x', rotation=45, labelsize=9)
+ax.tick_params(axis='y', rotation=0, labelsize=9)
+fig2.tight_layout()
+fig2.savefig('fig2_correlation.png', bbox_inches='tight')
+plt.close()
+print("Сохранено: fig2_correlation.png")
+
+# ─────────────────────────────────────────────────────────────
+# 7. ИТОГОВАЯ СВОДКА
+# ─────────────────────────────────────────────────────────────
+print("\n=== ИТОГОВАЯ СВОДКА ===")
+print(f"Период данных : {df['datetime'].min().date()} — {df['datetime'].max().date()}")
+print(f"Транзакций    : {len(df)}")
+print(f"Средний чек   : {df['total'].mean():.0f} KRW  (~{df['total'].mean()/1300:.1f} USD)")
+print(f"Медиана чека  : {df['total'].median():.0f} KRW")
+print(f"Топ-3 продукта: {', '.join(product_sales.head(3).index)}")
+print(f"Самый загруженный день: {df['day of week'].value_counts().idxmax()}")
+print(f"Среднее товаров в заказе: {df['num_items'].mean():.1f}")
